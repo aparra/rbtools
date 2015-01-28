@@ -122,33 +122,13 @@ class SVNClient(SCMClient):
                 'tip': self.REVISION_WORKING_COPY,
             }
         elif n_revisions == 1:
-            # Either a numeric revision (n-1:n) or a changelist
+            # Either a numeric revision (n:n+1) or a changelist
             revision = revisions[0]
-            try:
-                revision = self._convert_symbolic_revision(revision)
-                return {
-                    'base': revision - 1,
-                    'tip': revision,
-                }
-            except ValueError:
-                # It's not a revision--let's try a changelist. This only makes
-                # sense if we have a working copy.
-                if not self.options.repository_url:
-                    status = self._run_svn(['status', '--cl', str(revision),
-                                            '--ignore-externals', '--xml'])
-                    cl = ElementTree.fromstring(status).find('changelist')
-                    if cl is not None:
-                        # TODO: this should warn about mixed-revision working
-                        # copies that affect the list of files changed (see
-                        # bug 2392).
-                        return {
-                            'base': 'BASE',
-                            'tip': self.REVISION_CHANGELIST_PREFIX + revision
-                        }
-
-                raise InvalidRevisionSpecError(
-                    '"%s" does not appear to be a valid revision or '
-                    'changelist name' % revision)
+            revision = self._convert_symbolic_revision(re.sub(' ', ':', revision))
+            return {
+                 'base': revision,
+                 'tip': revision + 1,
+            }
         elif n_revisions == 2:
             # Diff between two numeric revisions
             try:
@@ -164,9 +144,11 @@ class SVNClient(SCMClient):
 
     def _convert_symbolic_revision(self, revision):
         command = ['log', '-r', str(revision), '-l', '1', '--xml']
-        if getattr(self.options, 'repository_url', None):
+        
+	if getattr(self.options, 'repository_url', None):
             command.append(self.options.repository_url)
-        log = self._run_svn(command, ignore_errors=True,
+        
+	log = self._run_svn(command, ignore_errors=True,
                             none_on_ignored_error=True)
 
         if log is not None:
@@ -243,41 +225,12 @@ class SVNClient(SCMClient):
         else:
             # Diff between two separate revisions. Behavior depends on whether
             # or not there's a working copy
-            if self.options.repository_url:
-                # No working copy--create 'old' and 'new' URLs
-                if len(include_files) == 1:
-                    # If there's a single file or directory passed in, we use
-                    # that as part of the URL instead of as a separate
-                    # filename.
-                    repository_info.set_base_path(include_files[0])
-                    include_files = []
+            # Working copy--do a normal range diff
 
-                new_url = (repository_info.path + repository_info.base_path +
-                           '@' + tip)
+	    diff_cmd.extend(['-r', '%s:%s' % (base, tip)])
 
-                # When the source revision is '0', assume the user wants to
-                # upload a diff containing all the files in 'base_path' as
-                # new files. If the base path within the repository is added to
-                # both the old and new URLs, `svn diff` will error out, since
-                # the base_path didn't exist at revision 0. To avoid that
-                # error, use the repository's root URL as the source for the
-                # diff.
-                if base == '0':
-                    old_url = repository_info.path + '@' + base
-                else:
-                    old_url = (repository_info.path +
-                               repository_info.base_path + '@' + base)
-
-                diff_cmd.extend([old_url, new_url])
-
-                empty_files_revisions['base'] = '(revision %s)' % base
-                empty_files_revisions['tip'] = '(revision %s)' % tip
-            else:
-                # Working copy--do a normal range diff
-                diff_cmd.extend(['-r', '%s:%s' % (base, tip)])
-
-                empty_files_revisions['base'] = '(revision %s)' % base
-                empty_files_revisions['tip'] = '(revision %s)' % tip
+            empty_files_revisions['base'] = '(revision %s)' % base
+            empty_files_revisions['tip'] = '(revision %s)' % tip
 
         diff_cmd.extend(include_files)
 
@@ -295,25 +248,14 @@ class SVNClient(SCMClient):
                     diff_cmd.append("--show-copies-as-adds")
 
         this_dir = os.getcwd()
-        os.chdir(self.svn_info('.')['Working Copy Root Path'])
 
         try:
+	    if getattr(self.options, 'repository_url', None):
+            	diff_cmd.append(self.options.repository_url)
+
             diff = self._run_svn(diff_cmd, split_lines=True)
         finally:
             os.chdir(this_dir)
-
-        diff = self.handle_renames(diff)
-
-        if self._supports_empty_files():
-            diff = self._handle_empty_files(diff, diff_cmd,
-                                            empty_files_revisions)
-
-        diff = self.convert_to_absolute_paths(diff, repository_info)
-
-        if exclude_patterns:
-            diff = filter_diff(
-                diff, self.INDEX_FILE_RE, exclude_patterns,
-                base_dir=self.svn_info('.')['Working Copy Root Path'])
 
         return {
             'diff': ''.join(diff),
